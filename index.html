@@ -294,13 +294,14 @@
         const newBgColor = document.getElementById('newBgColor');
         const loadingSpinner = document.getElementById('loadingSpinner');
         const placeholderText = document.getElementById('placeholderText');
-        const statusText = document.getElementById('statusText'); // New
+        const statusText = document.getElementById('statusText');
         const appWindow = document.querySelector('.app-window');
 
-        let originalImage = null; // Store the original Image object
+        let originalImage = null; // Stores the original Image object
+        let currentProcessedImageData = null; // Stores the current ImageData (after BG removal, before BG color change)
         let net; // BodyPix model
 
-        // --- UI Updates ---
+        // --- UI Updates & Helpers ---
         function showSpinner(message = "प्रोसेसिंग...") {
             loadingSpinner.style.display = 'block';
             statusText.textContent = message;
@@ -311,7 +312,7 @@
         function hideSpinner(message = "") {
             loadingSpinner.style.display = 'none';
             statusText.textContent = message;
-            if (message === "") {
+            if (message === "") { // Only hide status text if message is empty
                 statusText.style.display = 'none';
             }
         }
@@ -320,22 +321,17 @@
         async function loadBodyPixModel() {
             showSpinner("AI मॉडल लोड हो रहा है (पहली बार में कुछ समय लग सकता है)...");
             try {
-                // You can choose different models or multipliers for performance/accuracy trade-offs
-                // Example: bodyPix.load({ architecture: 'ResNet50', outputStride: 16, quantBytes: 2 });
                 net = await bodyPix.load();
                 hideSpinner("मॉडल सफलतापूर्वक लोड हो गया है। इमेज अपलोड करें!");
                 upload.disabled = false; // Enable upload once model is ready
-                placeholderText.style.display = 'block';
-                canvas.style.display = 'none'; // Hide canvas until image
+                placeholderText.style.display = 'block'; // Show placeholder
+                canvas.style.display = 'none'; // Ensure canvas is hidden until image is loaded
             } catch (error) {
                 console.error("बॉडीपिक्स मॉडल लोड करने में विफल:", error);
                 hideSpinner("मॉडल लोड करने में त्रुटि हुई। कृपया इंटरनेट कनेक्शन जांचें।");
                 alert("AI मॉडल लोड नहीं हो सका। कृपया अपना इंटरनेट कनेक्शन जांचें।");
             }
         }
-
-        // Load model when page loads
-        document.addEventListener('DOMContentLoaded', loadBodyPixModel);
 
         // --- Event Listeners ---
         upload.addEventListener('change', handleImageUpload);
@@ -365,17 +361,13 @@
             if (!originalImage || !net) return;
             showSpinner("बैकग्राउंड हटा रहा हूँ...");
 
-            // Use setTimeout to allow spinner to render before heavy computation
-            setTimeout(async () => {
+            setTimeout(async () => { // Allow spinner to render before heavy computation
                 try {
-                    // Segment the image to get a mask
-                    // We can also use personSegmentation if we only want humans
-                    // For more general object, it's harder with BodyPix (it's person-centric)
                     const segmentation = await net.segmentPerson(originalImage, {
-                        flipHorizontal: false, // Set to true if selfies are horizontally flipped
-                        internalResolution: 'medium', // 'low', 'medium', 'high', 'full'
-                        segmentationThreshold: 0.7, // Adjust confidence threshold (0 to 1)
-                        maxDetections: 1 // Only segment the first person found
+                        flipHorizontal: false,
+                        internalResolution: 'medium',
+                        segmentationThreshold: 0.7,
+                        maxDetections: 1
                     });
 
                     if (!segmentation || segmentation.allMask.width === 0) {
@@ -384,23 +376,24 @@
                         return;
                     }
 
-                    // Draw the original image on the canvas
-                    ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear previous content
-                    ctx.drawImage(originalImage, 0, 0, canvas.width, canvas.height);
-
-                    // Get the image data for the canvas
-                    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                    // Create a temporary canvas to draw the original image
+                    // This ensures we're working with the original pixels
+                    const tempCanvas = document.createElement('canvas');
+                    tempCanvas.width = originalImage.width;
+                    tempCanvas.height = originalImage.height;
+                    const tempCtx = tempCanvas.getContext('2d');
+                    tempCtx.drawImage(originalImage, 0, 0);
+                    
+                    // Get image data from the temporary canvas
+                    const imageData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
                     const data = imageData.data;
-                    const maskData = segmentation.data; // The segmentation mask data
+                    const maskData = segmentation.data;
 
-                    // Apply the mask: make pixels transparent where mask value is low
-                    // Mask values are 0-1, so scale them to 0-255 for alpha
-                    // The mask will be 0 for background, ~255 for person
+                    // Apply the mask to make background transparent
                     for (let i = 0; i < maskData.length; i++) {
-                        const alpha = maskData[i] * 255; // Scale mask value to alpha
+                        const alpha = maskData[i] * 255;
                         const pixelIndex = i * 4;
 
-                        // Set alpha to 0 for background, keep original alpha for foreground
                         if (alpha < 128) { // If mask confidence is low (background)
                             data[pixelIndex + 3] = 0; // Make pixel transparent
                         } else {
@@ -408,7 +401,15 @@
                         }
                     }
 
-                    ctx.putImageData(imageData, 0, 0); // Put the modified image data back
+                    // Draw the processed image data back to the main canvas
+                    // First, clear and resize main canvas to fit original image dimensions
+                    canvas.width = originalImage.width;
+                    canvas.height = originalImage.height;
+                    ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear main canvas
+                    ctx.putImageData(imageData, 0, 0); // Put processed data on main canvas
+
+                    currentProcessedImageData = ctx.getImageData(0,0,canvas.width,canvas.height); // Store for further processing
+
                     applyBgBtn.disabled = false;
                     downloadBtn.disabled = false;
                     hideSpinner("बैकग्राउंड हटा दिया गया!");
@@ -421,25 +422,26 @@
         });
 
         applyBgBtn.addEventListener('click', () => {
-            // Apply background is still similar to previous version
-            if (!originalImage) return; // Should be originalImage here, not currentImageData after removeBg
-
+            if (!currentProcessedImageData) return; // Ensure we have a processed image first
             showSpinner("नया बैकग्राउंड लगा रहा हूँ...");
-            setTimeout(() => {
+
+            setTimeout(() => { // Allow spinner to render
                 const bgColor = hexToRgb(newBgColor.value);
-                // Get the *current* image data from canvas after background removal
-                const currentImageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                const data = currentImageData.data;
+                // Create a working copy from currentProcessedImageData
+                const imageDataForApply = ctx.createImageData(currentProcessedImageData.width, currentProcessedImageData.height);
+                imageDataForApply.data.set(currentProcessedImageData.data); // Copy data
+
+                const data = imageDataForApply.data;
 
                 for (let i = 0; i < data.length; i += 4) {
-                    if (data[i + 3] === 0) { // If transparent
+                    if (data[i + 3] === 0) { // If pixel is transparent
                         data[i] = bgColor.r;
                         data[i + 1] = bgColor.g;
                         data[i + 2] = bgColor.b;
-                        data[i + 3] = 255; // Make it opaque
+                        data[i + 3] = 255; // Make it opaque with new background color
                     }
                 }
-                ctx.putImageData(currentImageData, 0, 0);
+                ctx.putImageData(imageDataForApply, 0, 0); // Draw to main canvas
                 downloadBtn.disabled = false;
                 hideSpinner("बैकग्राउंड लागू किया गया!");
             }, 10);
@@ -447,19 +449,22 @@
 
         resetBtn.addEventListener('click', () => {
             if (originalImage) {
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                ctx.drawImage(originalImage, 0, 0, canvas.width, canvas.height); // Redraw original
+                // Resize canvas back to original image dimensions before redrawing
+                canvas.width = originalImage.width;
+                canvas.height = originalImage.height;
+                ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear existing content
+                ctx.drawImage(originalImage, 0, 0, canvas.width, canvas.height); // Redraw original image
             }
-            resetUI();
-            placeholderText.style.display = 'block';
-            canvas.style.display = 'none';
-            hideSpinner("इमेज अपलोड करें या ड्रैग एंड ड्रॉप करें");
+            resetUIState(); // Reset UI buttons and internal variables
+            placeholderText.style.display = 'block'; // Show placeholder
+            canvas.style.display = 'none'; // Hide canvas
+            hideSpinner("इमेज अपलोड करें या ड्रैग एंड ड्रॉप करें"); // Update status
         });
 
         downloadBtn.addEventListener('click', () => {
             const link = document.createElement('a');
             link.download = 'edited-image.png';
-            link.href = canvas.toDataURL('image/png');
+            link.href = canvas.toDataURL('image/png'); // Get current canvas content
             link.click();
         });
 
@@ -467,23 +472,24 @@
         function handleImageUpload(e) {
             const file = e.target.files[0];
             if (!file) return;
+
             if (!file.type.startsWith('image/')) {
                 alert('कृपया एक इमेज फाइल अपलोड करें।');
                 return;
             }
 
             showSpinner("इमेज लोड हो रही है...");
-            resetUI(); // Reset UI state
+            resetUIState(); // Reset UI buttons and internal variables
 
             const reader = new FileReader();
             reader.onload = function(evt) {
                 const img = new Image();
                 img.onload = function() {
-                    originalImage = img; // Store the actual Image object
+                    originalImage = img; // Store the original Image object
 
-                    // Resize canvas to fit in UI while maintaining aspect ratio
-                    const maxWidth = appWindow.clientWidth * 0.75;
-                    const maxHeight = window.innerHeight * 0.6;
+                    // Calculate new dimensions to fit within the UI
+                    const maxWidth = appWindow.clientWidth * 0.75; // 75% of app window width
+                    const maxHeight = window.innerHeight * 0.6; // 60% of viewport height
                     let aspectRatio = img.width / img.height;
                     let newWidth = img.width;
                     let newHeight = img.height;
@@ -496,12 +502,14 @@
                         newHeight = maxHeight;
                         newWidth = newHeight * aspectRatio;
                     }
-
+                    
+                    // Resize canvas to scaled dimensions for display purposes
                     canvas.width = newWidth;
                     canvas.height = newHeight;
-                    ctx.drawImage(originalImage, 0, 0, canvas.width, canvas.height);
+                    ctx.drawImage(originalImage, 0, 0, canvas.width, canvas.height); // Draw scaled image to canvas
                     
-                    removeBgBtn.disabled = false; // Enable remove background button
+                    // Enable relevant buttons
+                    removeBgBtn.disabled = false;
                     resetBtn.disabled = false;
                     
                     hideSpinner("इमेज लोड हो गई! बैकग्राउंड हटाने के लिए क्लिक करें।");
@@ -511,7 +519,7 @@
                 img.onerror = () => {
                     alert('इमेज लोड करने में समस्या हुई। कृपया एक वैध इमेज फाइल अपलोड करें।');
                     hideSpinner("लोड करने में त्रुटि!");
-                    resetUI();
+                    resetUIState();
                 };
                 img.src = evt.target.result;
             };
@@ -531,25 +539,31 @@
             };
         }
 
-        // --- Utility Functions ---
-        function resetUI() {
+        // --- UI State Management ---
+        function resetUIState() {
+            // Reset all buttons to disabled (except upload which will be enabled by model load)
             removeBgBtn.disabled = true;
             applyBgBtn.disabled = true;
             resetBtn.disabled = true;
             downloadBtn.disabled = true;
+            
+            // Reset input values
             newBgColor.value = '#ffffff';
-            ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear canvas content
-            canvas.width = 0; // Reset canvas size (optional, can keep for placeholder)
+            upload.value = ''; // Clear file input selection
+            
+            // Clear canvas and internal image data
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            canvas.width = 0; // Reset canvas dimensions to zero
             canvas.height = 0;
-            originalImage = null; // Clear original image object
-            upload.value = ''; // Clear file input
+            originalImage = null;
+            currentProcessedImageData = null;
         }
 
-        // Initial UI setup
-        resetUI();
+        // Initial setup: load model and reset UI
+        resetUIState();
         upload.disabled = true; // Disable upload until model is loaded
-        canvas.style.display = 'none';
-        // statusText will show "AI model loading..."
+        canvas.style.display = 'none'; // Hide canvas initially
+        loadBodyPixModel(); // Start loading the AI model
     </script>
 
 </body>
