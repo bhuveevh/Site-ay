@@ -297,8 +297,10 @@
         const statusText = document.getElementById('statusText');
         const appWindow = document.querySelector('.app-window');
 
-        let originalImage = null; // Stores the original Image object
-        let currentProcessedImageData = null; // Stores the current ImageData (after BG removal, before BG color change)
+        let originalImage = null; // Stores the original Image object (for redraws)
+        let originalImageData = null; // Stores the original image's pixel data (unscaled)
+        let processedImageData = null; // Stores the processed (transparent background) image data
+
         let net; // BodyPix model
 
         // --- UI Updates & Helpers ---
@@ -312,7 +314,7 @@
         function hideSpinner(message = "") {
             loadingSpinner.style.display = 'none';
             statusText.textContent = message;
-            if (message === "") { // Only hide status text if message is empty
+            if (message === "") {
                 statusText.style.display = 'none';
             }
         }
@@ -324,7 +326,7 @@
                 net = await bodyPix.load();
                 hideSpinner("मॉडल सफलतापूर्वक लोड हो गया है। इमेज अपलोड करें!");
                 upload.disabled = false; // Enable upload once model is ready
-                placeholderText.style.display = 'block'; // Show placeholder
+                placeholderText.style.display = 'block';
                 canvas.style.display = 'none'; // Ensure canvas is hidden until image is loaded
             } catch (error) {
                 console.error("बॉडीपिक्स मॉडल लोड करने में विफल:", error);
@@ -338,7 +340,7 @@
 
         appWindow.addEventListener('dragover', (e) => {
             e.preventDefault();
-            appWindow.style.borderColor = var(--mac-highlight-blue);
+            appWindow.style.borderColor = 'var(--mac-highlight-blue)'; // Use CSS variable
         });
 
         appWindow.addEventListener('dragleave', () => {
@@ -358,57 +360,55 @@
         });
 
         removeBgBtn.addEventListener('click', async () => {
-            if (!originalImage || !net) return;
+            if (!originalImageData || !net) return; // Use originalImageData here
             showSpinner("बैकग्राउंड हटा रहा हूँ...");
 
             setTimeout(async () => { // Allow spinner to render before heavy computation
                 try {
-                    const segmentation = await net.segmentPerson(originalImage, {
-                        flipHorizontal: false,
-                        internalResolution: 'medium',
-                        segmentationThreshold: 0.7,
-                        maxDetections: 1
-                    });
+                    // BodyPix needs an HTMLImageElement, HTMLVideoElement, or HTMLCanvasElement
+                    // Draw originalImageData onto a temporary canvas to pass to BodyPix
+                    const tempBodyPixCanvas = document.createElement('canvas');
+                    tempBodyPixCanvas.width = originalImageData.width;
+                    tempBodyPixCanvas.height = originalImageData.height;
+                    const tempBodyPixCtx = tempBodyPixCanvas.getContext('2d');
+                    tempBodyPixCtx.putImageData(originalImageData, 0, 0);
 
-                    if (!segmentation || segmentation.allMask.width === 0) {
+
+                    const segmentation = await net.segmentPerson(tempBodyPixCanvas, {
+    flipHorizontal: false,
+    internalResolution: 'medium',
+    segmentationThreshold: 0.6, // इसे 0.7 से 0.6 या 0.5 में बदलें
+    maxDetections: 1
+});
+
+                    if (!segmentation || !segmentation.allMask || segmentation.allMask.width === 0) {
                         alert("ऑब्जेक्ट (इंसान) का पता नहीं चल सका। कृपया एक अलग इमेज ट्राई करें।");
                         hideSpinner("ऑब्जेक्ट नहीं मिला।");
                         return;
                     }
 
-                    // Create a temporary canvas to draw the original image
-                    // This ensures we're working with the original pixels
-                    const tempCanvas = document.createElement('canvas');
-                    tempCanvas.width = originalImage.width;
-                    tempCanvas.height = originalImage.height;
-                    const tempCtx = tempCanvas.getContext('2d');
-                    tempCtx.drawImage(originalImage, 0, 0);
-                    
-                    // Get image data from the temporary canvas
-                    const imageData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
-                    const data = imageData.data;
+                    // Create a copy of originalImageData to modify
+                    const dataCopy = new Uint8ClampedArray(originalImageData.data);
                     const maskData = segmentation.data;
 
-                    // Apply the mask to make background transparent
+                    // Apply the mask: make pixels transparent where mask value is low
                     for (let i = 0; i < maskData.length; i++) {
                         const alpha = maskData[i] * 255;
                         const pixelIndex = i * 4;
 
                         if (alpha < 128) { // If mask confidence is low (background)
-                            data[pixelIndex + 3] = 0; // Make pixel transparent
+                            dataCopy[pixelIndex + 3] = 0; // Make pixel transparent
                         } else {
-                            data[pixelIndex + 3] = 255; // Keep opaque (foreground)
+                            // Keep foreground opaque (or its original alpha if it had one)
+                            dataCopy[pixelIndex + 3] = originalImageData.data[pixelIndex + 3];
                         }
                     }
+                    
+                    // Create new ImageData object from modified dataCopy
+                    processedImageData = new ImageData(dataCopy, originalImageData.width, originalImageData.height);
 
-                    // Draw the processed image data back to the main canvas
-                    // First, clear and resize main canvas to fit original image dimensions
-                    canvas.width = originalImage.width;
-                    canvas.height = originalImage.height;
-                    ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear main canvas
-                    ctx.putImageData(imageData, 0, 0); // Put processed data on main canvas
-
-                    currentProcessedImageData = ctx.getImageData(0,0,canvas.width,canvas.height); // Store for further processing
+                    // Now draw the processed image data to the *main* canvas, scaled
+                    drawScaledImage(processedImageData, originalImage.width, originalImage.height);
 
                     applyBgBtn.disabled = false;
                     downloadBtn.disabled = false;
@@ -422,16 +422,17 @@
         });
 
         applyBgBtn.addEventListener('click', () => {
-            if (!currentProcessedImageData) return; // Ensure we have a processed image first
+            if (!processedImageData) return; // Needs processed image data with transparency
             showSpinner("नया बैकग्राउंड लगा रहा हूँ...");
 
             setTimeout(() => { // Allow spinner to render
                 const bgColor = hexToRgb(newBgColor.value);
-                // Create a working copy from currentProcessedImageData
-                const imageDataForApply = ctx.createImageData(currentProcessedImageData.width, currentProcessedImageData.height);
-                imageDataForApply.data.set(currentProcessedImageData.data); // Copy data
+                
+                // Create a temporary ImageData object to apply new background color without modifying processedImageData
+                const finalImageData = ctx.createImageData(processedImageData.width, processedImageData.height);
+                finalImageData.data.set(processedImageData.data); // Copy processed data
 
-                const data = imageDataForApply.data;
+                const data = finalImageData.data;
 
                 for (let i = 0; i < data.length; i += 4) {
                     if (data[i + 3] === 0) { // If pixel is transparent
@@ -441,7 +442,10 @@
                         data[i + 3] = 255; // Make it opaque with new background color
                     }
                 }
-                ctx.putImageData(imageDataForApply, 0, 0); // Draw to main canvas
+                
+                // Draw the final image data (with new background) to the main canvas, scaled
+                drawScaledImage(finalImageData, processedImageData.width, processedImageData.height);
+
                 downloadBtn.disabled = false;
                 hideSpinner("बैकग्राउंड लागू किया गया!");
             }, 10);
@@ -449,11 +453,8 @@
 
         resetBtn.addEventListener('click', () => {
             if (originalImage) {
-                // Resize canvas back to original image dimensions before redrawing
-                canvas.width = originalImage.width;
-                canvas.height = originalImage.height;
-                ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear existing content
-                ctx.drawImage(originalImage, 0, 0, canvas.width, canvas.height); // Redraw original image
+                // Draw the original image again, scaled
+                drawScaledImage(originalImageData, originalImage.width, originalImage.height);
             }
             resetUIState(); // Reset UI buttons and internal variables
             placeholderText.style.display = 'block'; // Show placeholder
@@ -487,26 +488,16 @@
                 img.onload = function() {
                     originalImage = img; // Store the original Image object
 
-                    // Calculate new dimensions to fit within the UI
-                    const maxWidth = appWindow.clientWidth * 0.75; // 75% of app window width
-                    const maxHeight = window.innerHeight * 0.6; // 60% of viewport height
-                    let aspectRatio = img.width / img.height;
-                    let newWidth = img.width;
-                    let newHeight = img.height;
-
-                    if (newWidth > maxWidth) {
-                        newWidth = maxWidth;
-                        newHeight = newWidth / aspectRatio;
-                    }
-                    if (newHeight > maxHeight) {
-                        newHeight = maxHeight;
-                        newWidth = newHeight * aspectRatio;
-                    }
+                    // Create a temporary canvas to get original pixel data without scaling
+                    const tempOriginalCanvas = document.createElement('canvas');
+                    tempOriginalCanvas.width = img.width;
+                    tempOriginalCanvas.height = img.height;
+                    const tempOriginalCtx = tempOriginalCanvas.getContext('2d');
+                    tempOriginalCtx.drawImage(img, 0, 0);
+                    originalImageData = tempOriginalCtx.getImageData(0, 0, img.width, img.height);
                     
-                    // Resize canvas to scaled dimensions for display purposes
-                    canvas.width = newWidth;
-                    canvas.height = newHeight;
-                    ctx.drawImage(originalImage, 0, 0, canvas.width, canvas.height); // Draw scaled image to canvas
+                    // Draw the image to the main canvas, scaled for display
+                    drawScaledImage(originalImageData, img.width, img.height);
                     
                     // Enable relevant buttons
                     removeBgBtn.disabled = false;
@@ -526,6 +517,44 @@
             reader.readAsDataURL(file);
         }
 
+        /**
+         * Draws an ImageData object onto the main canvas, scaled to fit.
+         * @param {ImageData} imageData The ImageData object to draw.
+         * @param {number} originalWidth The original width of the ImageData.
+         * @param {number} originalHeight The original height of the ImageData.
+         */
+        function drawScaledImage(imageData, originalWidth, originalHeight) {
+            // Calculate new dimensions to fit within the UI
+            const maxWidth = appWindow.clientWidth * 0.75; // 75% of app window width
+            const maxHeight = window.innerHeight * 0.6; // 60% of viewport height
+            let aspectRatio = originalWidth / originalHeight;
+            let displayWidth = originalWidth;
+            let displayHeight = originalHeight;
+
+            if (displayWidth > maxWidth) {
+                displayWidth = maxWidth;
+                displayHeight = displayWidth / aspectRatio;
+            }
+            if (displayHeight > maxHeight) {
+                displayHeight = maxHeight;
+                displayWidth = displayHeight * aspectRatio;
+            }
+            
+            // Set main canvas display dimensions
+            canvas.style.width = `${displayWidth}px`;
+            canvas.style.height = `${displayHeight}px`;
+
+            // Set actual canvas rendering dimensions to original image dimensions for pixel accuracy
+            // This is crucial for getImageData/putImageData to work correctly
+            canvas.width = originalWidth;
+            canvas.height = originalHeight;
+
+            // Clear the canvas and put the ImageData
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.putImageData(imageData, 0, 0);
+        }
+
+
         function hexToRgb(hex) {
             hex = hex.replace('#', '');
             if (hex.length === 3) {
@@ -541,22 +570,23 @@
 
         // --- UI State Management ---
         function resetUIState() {
-            // Reset all buttons to disabled (except upload which will be enabled by model load)
             removeBgBtn.disabled = true;
             applyBgBtn.disabled = true;
             resetBtn.disabled = true;
             downloadBtn.disabled = true;
             
-            // Reset input values
             newBgColor.value = '#ffffff';
-            upload.value = ''; // Clear file input selection
+            upload.value = '';
             
-            // Clear canvas and internal image data
             ctx.clearRect(0, 0, canvas.width, canvas.height);
-            canvas.width = 0; // Reset canvas dimensions to zero
+            canvas.width = 0; // Reset canvas dimensions
             canvas.height = 0;
+            canvas.style.width = 'auto'; // Reset display width/height
+            canvas.style.height = 'auto';
+
             originalImage = null;
-            currentProcessedImageData = null;
+            originalImageData = null;
+            processedImageData = null;
         }
 
         // Initial setup: load model and reset UI
