@@ -1,111 +1,242 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Website Content Tracker</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Background Remover</title>
   <style>
     body {
-      font-family: Arial, sans-serif;
-      margin: 2rem;
-      background-color: #f2f2f2;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f0f0f0;
+      color: #333;
+      text-align: center;
+      margin: 0;
+      padding: 2rem;
     }
-    input, select, button {
-      padding: 10px;
-      margin: 5px 0;
-      width: 100%;
-      max-width: 400px;
-      font-size: 16px;
+    h1 {
+      margin-bottom: 1rem;
     }
-    #log {
-      margin-top: 20px;
-      padding: 15px;
-      background: #fff;
-      border-radius: 5px;
-      height: 300px;
-      overflow-y: auto;
-      white-space: pre-wrap;
-      box-shadow: 0 0 5px rgba(0,0,0,0.2);
+    canvas {
+      border-radius: 10px;
+      box-shadow: 0 0 8px #aaa;
+      max-width: 100%;
+      height: auto;
+      margin: 1rem 0;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+    .controls label {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      font-size: 0.9rem;
+    }
+    input[type="file"],
+    input[type="color"],
+    input[type="range"],
+    button {
+      padding: 0.4rem;
+      border-radius: 6px;
+      border: none;
+      box-shadow: 0 0 4px #ccc;
+    }
+    button {
+      cursor: pointer;
+      background: #007aff;
+      color: white;
+    }
+    .color-box {
+      width: 30px;
+      height: 30px;
+      border-radius: 6px;
+      border: 1px solid #aaa;
+      margin-top: 0.4rem;
     }
   </style>
 </head>
 <body>
-  <h2>🔍 Website Content Tracker (Real-time)</h2>
 
-  <label>Website URL:</label>
-  <input type="text" id="url" placeholder="https://example.com">
+<h1>Background Remover Tool</h1>
 
-  <label>Element Selector (e.g. #content, .news):</label>
-  <input type="text" id="selector" placeholder="#main-content">
+<div class="controls">
+  <label>
+    Upload Image
+    <input type="file" id="upload" accept="image/*" />
+  </label>
 
-  <label>Check Interval:</label>
-  <select id="interval">
-    <option value="60000">Every 1 minute</option>
-    <option value="300000">Every 5 minutes</option>
-    <option value="600000">Every 10 minutes</option>
-  </select>
+  <label>
+    Selected Color<br>(Click on image)
+    <div id="selectedColor" class="color-box"></div>
+  </label>
 
-  <button onclick="startTracking()">Start Tracking</button>
+  <label>
+    Tolerance
+    <input type="range" id="tolerance" min="0" max="100" value="30" />
+  </label>
 
-  <div id="log">Log output will appear here...</div>
+  <label>
+    New Background
+    <input type="color" id="newBgColor" value="#ffffff" />
+  </label>
+</div>
 
-  <script>
-    let previousContent = '';
-    let intervalId = null;
+<canvas id="canvas"></canvas>
 
-    function log(msg) {
-      const logBox = document.getElementById('log');
-      const time = new Date().toLocaleTimeString();
-      logBox.innerText = `[${time}] ${msg}\n` + logBox.innerText;
-    }
+<div class="controls">
+  <button id="removeBgBtn" disabled>Remove Background</button>
+  <button id="applyBgBtn" disabled>Apply Background</button>
+  <button id="downloadBtn" disabled>Download</button>
+</div>
 
-    async function fetchContent(url, selector) {
-      try {
-        const proxyUrl = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url);
-        const res = await fetch(proxyUrl);
-        const html = await res.text();
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(html, 'text/html');
-        const target = doc.querySelector(selector);
-        return target ? target.innerText.trim() : null;
-      } catch (err) {
-        log('❌ Error fetching: ' + err.message);
-        return null;
+<script>
+  const upload = document.getElementById('upload');
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  const removeBgBtn = document.getElementById('removeBgBtn');
+  const applyBgBtn = document.getElementById('applyBgBtn');
+  const downloadBtn = document.getElementById('downloadBtn');
+  const toleranceRange = document.getElementById('tolerance');
+  const newBgColor = document.getElementById('newBgColor');
+  const selectedColorBox = document.getElementById('selectedColor');
+
+  let originalImageData = null;
+  let currentImageData = null;
+  let selectedBgColor = null;
+
+  upload.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = function(evt) {
+      const img = new Image();
+      img.onload = function() {
+        canvas.width = img.width;
+        canvas.height = img.height;
+        ctx.drawImage(img, 0, 0);
+        originalImageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        currentImageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+        removeBgBtn.disabled = true;
+        applyBgBtn.disabled = true;
+        downloadBtn.disabled = true;
+
+        selectedBgColor = null;
+        setColorSwatch(selectedColorBox, null);
+      };
+      img.src = evt.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+
+  // Pick color on canvas click
+  canvas.addEventListener('click', (e) => {
+    if (!originalImageData) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.floor((e.clientX - rect.left));
+    const y = Math.floor((e.clientY - rect.top));
+    const idx = (y * canvas.width + x) * 4;
+
+    const data = originalImageData.data;
+    if (idx < 0 || idx + 3 >= data.length) return;
+
+    selectedBgColor = {
+      r: data[idx],
+      g: data[idx + 1],
+      b: data[idx + 2]
+    };
+    setColorSwatch(selectedColorBox, selectedBgColor);
+    removeBgBtn.disabled = false;
+  });
+
+  removeBgBtn.addEventListener('click', () => {
+    if (!originalImageData || !selectedBgColor) return;
+
+    const tolerance = parseInt(toleranceRange.value);
+    currentImageData = removeBackground(originalImageData, selectedBgColor, tolerance);
+    ctx.putImageData(currentImageData, 0, 0);
+
+    applyBgBtn.disabled = false;
+    downloadBtn.disabled = true;
+  });
+
+  applyBgBtn.addEventListener('click', () => {
+    if (!currentImageData) return;
+
+    const bgColor = hexToRgb(newBgColor.value);
+    for (let i = 0; i < currentImageData.data.length; i += 4) {
+      if (currentImageData.data[i + 3] === 0) {
+        currentImageData.data[i] = bgColor.r;
+        currentImageData.data[i + 1] = bgColor.g;
+        currentImageData.data[i + 2] = bgColor.b;
+        currentImageData.data[i + 3] = 255;
       }
     }
 
-    function startTracking() {
-      const url = document.getElementById('url').value.trim();
-      const selector = document.getElementById('selector').value.trim();
-      const interval = parseInt(document.getElementById('interval').value);
+    ctx.putImageData(currentImageData, 0, 0);
+    downloadBtn.disabled = false;
+  });
 
-      if (!url || !selector) {
-        log('⚠️ Please enter both URL and selector.');
-        return;
-      }
+  downloadBtn.addEventListener('click', () => {
+    const link = document.createElement('a');
+    link.download = 'edited-image.png';
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+  });
 
-      if (intervalId) clearInterval(intervalId); // Stop previous tracker if running
-
-      log(`✅ Started tracking ${url} for "${selector}" every ${interval / 60000} min...`);
-
-      async function checkChange() {
-        const content = await fetchContent(url, selector);
-        if (content === null) {
-          log('⚠️ Selector not found or error occurred.');
-          return;
-        }
-        if (previousContent && previousContent !== content) {
-          log('🟡 Content changed!');
-        } else if (!previousContent) {
-          log('ℹ️ First content loaded.');
-        } else {
-          log('✅ No change detected.');
-        }
-        previousContent = content;
-      }
-
-      checkChange(); // initial run
-      intervalId = setInterval(checkChange, interval);
+  function setColorSwatch(elem, color) {
+    if (!color) {
+      elem.style.backgroundColor = '#eee';
+      return;
     }
-  </script>
+    elem.style.backgroundColor = `rgb(${color.r}, ${color.g}, ${color.b})`;
+  }
+
+  function removeBackground(imgData, targetColor, tolerance) {
+    const w = imgData.width;
+    const h = imgData.height;
+    const data = new Uint8ClampedArray(imgData.data);
+
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+
+      if (colorDistance({ r, g, b }, targetColor) <= tolerance) {
+        data[i + 3] = 0;
+      }
+    }
+
+    return new ImageData(data, w, h);
+  }
+
+  function colorDistance(c1, c2) {
+    return Math.sqrt(
+      (c1.r - c2.r) ** 2 +
+      (c1.g - c2.g) ** 2 +
+      (c1.b - c2.b) ** 2
+    );
+  }
+
+  function hexToRgb(hex) {
+    hex = hex.replace('#', '');
+    if (hex.length === 3) {
+      hex = hex.split('').map(c => c + c).join('');
+    }
+    const bigint = parseInt(hex, 16);
+    return {
+      r: (bigint >> 16) & 255,
+      g: (bigint >> 8) & 255,
+      b: bigint & 255
+    };
+  }
+</script>
+
 </body>
 </html>
